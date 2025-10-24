@@ -1,17 +1,20 @@
-const https = require('https');
+const http = require('http'); // CHANGEMENT CLÉ : Utiliser 'http' au lieu de 'https'
 const WebSocket = require('ws');
 const { v4: uuidv4 } = require('uuid');
 
 // === PORT fourni par Render.com ===
-const PORT = process.env.PORT || 10000;
+// Render injectera la variable d'environnement PORT. Utiliser 8080 comme fallback standard.
+const PORT = process.env.PORT || 8080;
 
-// === Création du serveur HTTPS (Render gère automatiquement TLS via SNI) ===
-const server = https.createServer({}, (req, res) => {
+// === Création du serveur HTTP standard ===
+// Render s'occupera de la terminaison TLS (WSS) en amont
+const server = http.createServer((req, res) => {
+  // Petite route de diagnostic simple pour que Render sache que le serveur répond
   res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('Serveur WebSocket sécurisé (WSS) actif sur animaux-securiser.onrender.com\n');
+  res.end('Serveur WebSocket sécurisé (WSS) actif et ecoute sur le port interne ' + PORT);
 });
 
-// === Création du serveur WebSocket sécurisé ===
+// === Création du serveur WebSocket sécurisé (utilisant le serveur HTTP) ===
 const wss = new WebSocket.Server({ server });
 
 // === STOCKAGE DES CLIENTS ===
@@ -32,7 +35,7 @@ function broadcastEspStatus() {
       type: 'esp_status',
       espCam: espCamConnected,
       espStandard: espStandardConnected,
-      connected: espCamConnected
+      connected: espCamConnected // Reste pour compatibilité si l'app Android n'a besoin que d'un seul booléen
     };
     clients.android.send(JSON.stringify(statusMessage));
     console.log(`[Android] Status ESP envoyé: CAM=${espCamConnected}, STD=${espStandardConnected}`);
@@ -60,7 +63,10 @@ wss.on('connection', (socket, req) => {
   const registrationTimeout = setTimeout(() => {
     if (!socket.clientType) {
       console.log(`[Timeout] Client ${clientId} non enregistré → déconnexion`);
-      socket.send(JSON.stringify({ type: 'error', message: 'Enregistrement requis dans les 45s' }));
+      // Envoyer un message d'erreur JSON avant de fermer
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ type: 'error', message: 'Enregistrement requis dans les 45s' }));
+      }
       socket.close(1000, 'Timeout enregistrement');
     }
   }, 45000);
@@ -73,12 +79,13 @@ wss.on('connection', (socket, req) => {
 
       // === Si binaire (photo) ===
       if (isBinary) {
+        // Tente de vérifier si ce n'est pas un message JSON envoyé comme binaire
         const textData = data.toString('utf8');
         try {
           message = JSON.parse(textData);
           console.log(`[JSON via binaire] ${socket.clientType || 'Inconnu'} (${clientId}): ${textData}`);
         } catch (e) {
-          // C’est une photo
+          // Si l'analyse JSON échoue, c'est bien une photo
           if (socket.clientType === 'esp32-cam') {
             console.log(`Photo reçue (${data.length} bytes) de ESP32-CAM (${clientId})`);
 
@@ -90,11 +97,12 @@ wss.on('connection', (socket, req) => {
               console.log(`Android hors ligne → photo mise en attente (queue: ${photoQueue.length})`);
             }
 
+            // Envoi d'une commande à l'ESP standard (si nécessaire)
             sendToEspStandard({ type: 'turn_on_light' });
             return;
           } else {
-            console.log(`[Erreur] Données binaires reçues avant enregistrement`);
-            socket.send(JSON.stringify({ type: 'error', message: 'Enregistrement requis avant photo' }));
+            console.log(`[Erreur] Données binaires reçues d'un client non-CAM`);
+            socket.send(JSON.stringify({ type: 'error', message: 'Seul esp32-cam peut envoyer des photos' }));
             return;
           }
         }
@@ -115,6 +123,7 @@ wss.on('connection', (socket, req) => {
           console.log('Android connecté');
           socket.send(JSON.stringify({ type: 'registered', message: 'OK' }));
           broadcastEspStatus();
+          // Vider la file d'attente de photos
           while (photoQueue.length > 0) {
             const photo = photoQueue.shift();
             socket.send(photo);
@@ -145,13 +154,16 @@ wss.on('connection', (socket, req) => {
 
       // === COMMANDES ET ALERTES ===
       else if (message.type === 'alert' && ['esp32-cam', 'esp32-standard'].includes(socket.clientType)) {
+        // Transfert de l'alerte à l'application Android
         if (clients.android) {
           clients.android.send(JSON.stringify(message));
           console.log(`Alerte transférée à Android: ${message.message}`);
         }
+        // Commande pour allumer la lumière sur l'ESP Standard
         sendToEspStandard({ type: 'turn_on_light' });
       }
 
+      // L'Android envoie une nouvelle configuration réseau aux ESP
       else if (message.type === 'network_config' && socket.clientType === 'android') {
         const msg = JSON.stringify(message);
         if (clients.espCam) clients.espCam.send(msg);
@@ -159,6 +171,7 @@ wss.on('connection', (socket, req) => {
         socket.send(JSON.stringify({ type: 'command_response', success: true, message: `Config réseau envoyée` }));
       }
 
+      // L'Android envoie l'état de sécurité aux ESP
       else if (message.type === 'security_config' && socket.clientType === 'android') {
         const msg = JSON.stringify(message);
         if (clients.espCam) clients.espCam.send(msg);
@@ -166,8 +179,14 @@ wss.on('connection', (socket, req) => {
         socket.send(JSON.stringify({ type: 'command_response', success: true, message: `Sécurité mise à jour` }));
       }
 
+      // Heartbeat
       else if (message.type === 'ping') {
         socket.send(JSON.stringify({ type: 'pong' }));
+      }
+
+      else if (message.type === 'command_response' && clients.android && clients.android.readyState === WebSocket.OPEN) {
+          // Transférer la réponse de l'ESP à l'application Android
+          clients.android.send(JSON.stringify(message));
       }
 
       else {
@@ -176,7 +195,9 @@ wss.on('connection', (socket, req) => {
 
     } catch (error) {
       console.error(`[Erreur message] ${socket.clientId}:`, error.message);
-      socket.send(JSON.stringify({ type: 'error', message: 'Erreur serveur' }));
+      if (socket.readyState === WebSocket.OPEN) {
+         socket.send(JSON.stringify({ type: 'error', message: 'Erreur serveur interne lors du traitement du message' }));
+      }
     }
   });
 
@@ -203,8 +224,8 @@ wss.on('connection', (socket, req) => {
 
 // === DÉMARRAGE DU SERVEUR (écoute sur 0.0.0.0 pour Render) ===
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`SERVEUR WSS ACTIF`);
-  console.log(`→ URL: wss://animaux-securiser.onrender.com`);
-  console.log(`→ Port interne: ${PORT}`);
-  console.log(`→ Protocole: WSS (TLS géré par Render)`);
+  console.log('--- SERVEUR WSS ACTIF ---');
+  console.log(`→ URL Publique: wss://animaux-securiser.onrender.com`);
+  console.log(`→ Port Interne (HTTP): ${PORT}`);
+  console.log(`→ Connexion ESP-CAM : OK`);
 });

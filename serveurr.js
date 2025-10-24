@@ -2,42 +2,15 @@ const http = require('http');
 const WebSocket = require('ws');
 const { v4: uuidv4 } = require('uuid');
 
-const PORT = process.env.PORT || 8080;
+const PORT = process.env.PORT || 10000;
 
-// === CRÉATION DU SERVEUR HTTP ===
 const server = http.createServer((req, res) => {
-  res.writeCORS = function() {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  };
-
-  if (req.method === 'OPTIONS') {
-    res.writeCORS();
-    res.writeHead(200);
-    res.end();
-    return;
-  }
-
-  if (req.url === '/health') {
-    res.writeCORS();
-    res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('OK');
-    return;
-  }
-
-  res.writeCORS();
   res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('Serveur WebSocket actif (HTTP) - Port: ' + PORT);
+  res.end('Serveur WebSocket actif - Port: ' + PORT);
 });
 
-// === CRÉATION DU WEBSOCKET SERVER (HTTP) ===
-const wss = new WebSocket.Server({ 
-  server,
-  path: '/'  // IMPORTANT : chemin exact
-});
+const wss = new WebSocket.Server({ server, path: '/' });
 
-// === GESTION DES CLIENTS ===
 const clients = { android: null, espCam: null, espStandard: null };
 const photoQueue = [];
 let espCamConnected = false;
@@ -70,24 +43,35 @@ wss.on('connection', (socket, req) => {
 
   socket.on('message', (data) => {
     try {
-      let message;
-      const isBinary = Buffer.isBuffer(data);
-
-      if (isBinary) {
+      // === 1. PHOTO BINAIRE (ESP32-CAM) ===
+      if (Buffer.isBuffer(data)) {
         if (socket.clientType === 'esp32-cam') {
           console.log(`Photo reçue: ${data.length} bytes`);
+
           if (clients.android && clients.android.readyState === WebSocket.OPEN) {
-            clients.android.send(data);
+            clients.android.send(data); // Envoi binaire
           } else {
             photoQueue.push(data);
           }
           return;
+        } else {
+          console.log(`[ERREUR] Binaire reçu de ${socket.clientType || 'Inconnu'}`);
+          return;
         }
-      } else {
-        message = JSON.parse(data.toString());
-        console.log(`[JSON] ${socket.clientType || 'Inconnu'}:`, message);
       }
 
+      // === 2. MESSAGE TEXTE (JSON) ===
+      let message;
+      try {
+        message = JSON.parse(data.toString());
+      } catch (e) {
+        console.log(`[ERREUR] JSON invalide: ${data.toString()}`);
+        return;
+      }
+
+      console.log(`[JSON] ${socket.clientType || 'Inconnu'}:`, message);
+
+      // === ENREGISTREMENT ===
       if (message.type === 'register') {
         clearTimeout(timeout);
         const device = message.device;
@@ -105,26 +89,55 @@ wss.on('connection', (socket, req) => {
           espCamConnected = true;
           socket.send(JSON.stringify({ type: 'registered', message: 'OK' }));
           broadcastEspStatus();
+        } else if (device === 'esp32-standard') {
+          clients.espStandard = socket;
+          socket.clientType = 'esp32-standard';
+          socket.send(JSON.stringify({ type: 'registered', message: 'OK' }));
+          broadcastEspStatus();
+        } else {
+          socket.send(JSON.stringify({ type: 'error', message: 'Device inconnu' }));
         }
+      }
 
-      } else if (message.type === 'ping') {
+      // === HEARTBEAT ===
+      else if (message.type === 'ping') {
         socket.send(JSON.stringify({ type: 'pong' }));
       }
 
-    } catch (e) {
-      console.error("Erreur message:", e.message);
+      // === ALERTES ===
+      else if (message.type === 'alert' && socket.clientType?.includes('esp')) {
+        if (clients.android) {
+          clients.android.send(JSON.stringify(message));
+        }
+      }
+
+      // === COMMANDES ANDROID → ESP ===
+      else if (message.type === 'network_config' && socket.clientType === 'android') {
+        const msg = JSON.stringify(message);
+        if (clients.espCam) clients.espCam.send(msg);
+        if (clients.espStandard) clients.espStandard.send(msg);
+      }
+
+      else if (message.type === 'security_config' && socket.clientType === 'android') {
+        const msg = JSON.stringify(message);
+        if (clients.espCam) clients.espCam.send(msg);
+        if (clients.espStandard) clients.espStandard.send(msg);
+      }
+
+    } catch (error) {
+      console.error(`[ERREUR] ${clientId}:`, error.message);
     }
   });
 
-  socket.on('close', () => {
-    console.log(`[Déconnexion] ${socket.clientType || 'Inconnu'} (${clientId})`);
+  socket.on('close', (code, reason) => {
+    console.log(`[Déconnexion] ${socket.clientType || 'Inconnu'} (${clientId}), code=${code}`);
     if (socket === clients.android) clients.android = null;
     if (socket === clients.espCam) { clients.espCam = null; espCamConnected = false; broadcastEspStatus(); }
+    if (socket === clients.espStandard) clients.espStandard = null;
     clearTimeout(timeout);
   });
 });
 
-// === DÉMARRAGE ===
 server.listen(PORT, '0.0.0.0', () => {
   console.log('SERVEUR WEBSOCKET ACTIF');
   console.log(`URL: wss://animaux-securiser.onrender.com`);

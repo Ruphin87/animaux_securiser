@@ -1,31 +1,36 @@
-/////////////////////////////////////////////////////////////////
-serveur
-///////////////////////////////
+// Fichier : serveurr.js
+// Description : Serveur WebSocket sécurisé (WSS) pour la communication ESP32-CAM / ESP32-STANDARD / Android
+
 const http = require('http');
 const WebSocket = require('ws');
 const { v4: uuidv4 } = require('uuid');
+
 // === PORT fourni par Render.com ===
 const PORT = process.env.PORT || 8080;
+
 // === Création du serveur HTTP standard ===
 const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     res.end('Serveur WebSocket sécurisé (WSS) actif et ecoute sur le port interne ' + PORT);
 });
+
 // === Création du serveur WebSocket sécurisé (utilisant le serveur HTTP) ===
 const wss = new WebSocket.Server({ server });
+
 // === STOCKAGE DES CLIENTS ET FILES D'ATTENTE ===
 const clients = {
     android: null,
     espCam: null,
     espStandard: null
 };
+
 const photoQueue = []; // File d'attente pour les photos si Android est hors ligne
-const espCamCommandQueue = [];
-// 💡 NOUVEAU : File d'attente pour les commandes ESP-CAM
-const espStandardCommandQueue = [];
-// 💡 NOUVEAU : File d'attente pour les commandes ESP-Standard
+const espCamCommandQueue = []; // File d'attente pour les commandes ESP-CAM
+const espStandardCommandQueue = []; // File d'attente pour les commandes ESP-Standard
+
 let espCamConnected = false;
 let espStandardConnected = false;
+
 // === FONCTIONS UTILITAIRES ===
 function broadcastEspStatus() {
     if (clients.android && clients.android.readyState === WebSocket.OPEN) {
@@ -33,7 +38,7 @@ function broadcastEspStatus() {
             type: 'esp_status',
             espCam: espCamConnected,
             espStandard: espStandardConnected,
-            connected: espCamConnected // Reste pour compatibilité
+            connected: espCamConnected
         };
         clients.android.send(JSON.stringify(statusMessage));
         console.log(`[Android] Status ESP envoyé: CAM=${espCamConnected}, STD=${espStandardConnected}`);
@@ -46,7 +51,7 @@ function sendToEspStandard(message) {
         clients.espStandard.send(msg);
         console.log(`[ESP-Standard] Commande envoyée: ${msg}`);
     } else {
-        // 💡 Gestion de la file d'attente si déconnecté
+        // Gestion de la file d'attente si déconnecté
         espStandardCommandQueue.push(msg);
         console.log(`[Queue] ESP32-Standard déconnecté. Commande mise en attente.`);
     }
@@ -80,12 +85,9 @@ wss.on('connection', (socket, req) => {
             let message;
             const isBinary = Buffer.isBuffer(data);
             
-            // ************************************************************
-            // ** CORRECTION CRUCIALE : Isoler le traitement binaire/texte **
-            // ************************************************************
+            // CORRECTION CRUCIALE : Isoler le traitement binaire/texte
             if (isBinary) {
                 // === Si binaire (photo) ===
-                // On s'assure que seul l'ESP32-CAM est autorisé à envoyer du binaire
                 if (socket.clientType === 'esp32-cam') {
                     console.log(`Photo reçue (${data.length} bytes) de ESP32-CAM (${clientId})`);
                     
@@ -111,11 +113,7 @@ wss.on('connection', (socket, req) => {
                 message = JSON.parse(data.toString());
                 console.log(`[JSON] ${socket.clientType || 'Inconnu'} (${clientId}): ${JSON.stringify(message)}`);
             }
-            // ************************************************************
-            // ** FIN DE LA CORRECTION **
-            // ************************************************************
-
-
+            
             // === TRAITEMENT DES MESSAGES JSON ===
             if (message.type === 'register') {
                 clearTimeout(registrationTimeout);
@@ -141,7 +139,7 @@ wss.on('connection', (socket, req) => {
                     console.log('ESP32-CAM connecté');
                     socket.send(JSON.stringify({ type: 'registered', message: 'OK' }));
                     broadcastEspStatus();
-                    // 💡 Exécute les commandes en attente pour l'ESP-CAM
+                    // Exécute les commandes en attente pour l'ESP-CAM
                     while (espCamCommandQueue.length > 0) {
                         const command = espCamCommandQueue.shift();
                         clients.espCam.send(command);
@@ -155,7 +153,7 @@ wss.on('connection', (socket, req) => {
                     console.log('ESP32-Standard connecté');
                     socket.send(JSON.stringify({ type: 'registered', message: 'OK' }));
                     broadcastEspStatus();
-                    // 💡 Exécute les commandes en attente pour l'ESP-Standard
+                    // Exécute les commandes en attente pour l'ESP-Standard
                     while (espStandardCommandQueue.length > 0) {
                         const command = espStandardCommandQueue.shift();
                         clients.espStandard.send(command);
@@ -252,6 +250,7 @@ wss.on('connection', (socket, req) => {
             }
         }
     });
+
 // === GESTION DES DÉCONNEXIONS ===
     socket.on('close', (code, reason) => {
         console.log(`Déconnexion: ${socket.clientType || 'Inconnu'} (${clientId}), code=${code}`);
@@ -268,10 +267,12 @@ wss.on('connection', (socket, req) => {
         }
         clearTimeout(registrationTimeout);
     });
+
     socket.on('error', (err) => {
         console.error(`[Erreur WS] ${clientId}:`, err.message);
     });
 });
+
 // === DÉMARRAGE DU SERVEUR ===
 server.listen(PORT, '0.0.0.0', () => {
     console.log('--- SERVEUR WSS ACTIF ---');

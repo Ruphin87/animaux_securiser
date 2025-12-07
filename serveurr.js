@@ -21,7 +21,8 @@ const clients = {
     espStandard: null
 };
 
-const photoQueue = []; // File d'attente pour les photos (contient maintenant des strings JSON)
+// ATTENTION: La photoQueue stockera maintenant des Buffers (données binaires)
+const photoQueue = []; 
 const espCamCommandQueue = [];
 const espStandardCommandQueue = [];
 
@@ -35,7 +36,7 @@ function broadcastEspStatus() {
             type: 'esp_status',
             espCam: espCamConnected,
             espStandard: espStandardConnected,
-            connected: espCamConnected // Reste pour compatibilité
+            connected: espCamConnected
         };
         clients.android.send(JSON.stringify(statusMessage));
         console.log(`[Android] Status ESP envoyé: CAM=${espCamConnected}, STD=${espStandardConnected}`);
@@ -89,7 +90,7 @@ wss.on('connection', (socket, req) => {
                     message = JSON.parse(textData);
                     console.log(`[JSON via binaire] ${socket.clientType || 'Inconnu'} (${clientId}): ${textData}`);
                 } catch (e) {
-                    // CORRIGÉ: Ignorer les données binaires non JSON (plus de photo brute)
+                    // Ignorer les données binaires non JSON 
                     console.log(`[Erreur] Données binaires illisibles reçues de ${socket.clientType || 'Inconnu'}. Ignorées.`);
                     return;
                 }
@@ -111,11 +112,11 @@ wss.on('connection', (socket, req) => {
                     socket.send(JSON.stringify({ type: 'registered', message: 'OK' }));
                     broadcastEspStatus();
                     
-                    // Vider la file d'attente de photos (contient désormais des strings JSON)
+                    // Vider la file d'attente de photos (qui contient maintenant des Buffers binaires)
                     while (photoQueue.length > 0) {
-                        const photoJson = photoQueue.shift();
-                        socket.send(photoJson); // Envoi du JSON (texte)
-                        console.log(`Photo JSON en attente envoyée à Android`);
+                        const photoBuffer = photoQueue.shift();
+                        socket.send(photoBuffer); // Envoi du Buffer (binaire)
+                        console.log(`Photo binaire en attente envoyée à Android`);
                     }
 
                 } else if (device === 'esp32-cam') {
@@ -154,18 +155,26 @@ wss.on('connection', (socket, req) => {
                 }
             }
 
-            // 💡 NOUVEAU: GESTION DE LA RÉCEPTION D'IMAGE (JSON/Base64)
+            // 💡 MODIFICATION CLÉ: Décodage Base64 vers Binaire
             else if (message.type === 'image_data' && socket.clientType === 'esp32-cam') {
-                const base64Length = message.data ? message.data.length : 0;
-                console.log(`[Image Data] Photo Base64 reçue de ESP32-CAM. Taille Base64: ${base64Length}`);
+                const base64Image = message.data;
                 
-                // Transfert à l'application Android
+                if (!base64Image) {
+                    console.log("[Erreur] Message image_data sans données Base64.");
+                    return;
+                }
+                
+                // 1. Décodage de la chaîne Base64 en Buffer binaire
+                const imageBuffer = Buffer.from(base64Image, 'base64');
+                console.log(`[Image Data] Base64 reçue. Taille binaire pour Android: ${imageBuffer.length} bytes.`);
+                
+                // 2. Transfert à l'application Android
                 if (clients.android && clients.android.readyState === WebSocket.OPEN) {
-                    clients.android.send(JSON.stringify(message)); // Envoi du JSON complet (texte)
-                    console.log(`Photo Base64 transférée à Android`);
+                    clients.android.send(imageBuffer); // ENVOI DU BUFFER BINAIRE
+                    console.log(`Photo Binaire transférée à Android`);
                 } else {
-                    photoQueue.push(JSON.stringify(message)); // Mise en attente du JSON complet (texte)
-                    console.log(`Android hors ligne → image JSON mise en attente (queue: ${photoQueue.length})`);
+                    photoQueue.push(imageBuffer); // Mise en attente du Buffer binaire
+                    console.log(`Android hors ligne → image binaire mise en attente (queue: ${photoQueue.length})`);
                 }
 
                 // Commande pour allumer la lumière sur l'ESP Standard
